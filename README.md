@@ -12,6 +12,7 @@ non-negative integers.
 
 **Example:**
 For the following $3 \times 3$ grid:
+
 $$
 \mathbf{A} = \begin{bmatrix}
 1 & 3 & 1 \\
@@ -19,6 +20,7 @@ $$
 4 & 2 & 1
 \end{bmatrix}
 $$
+
 The optimal path is $1 \to 3 \to 1 \to 1 \to 1$, yielding a minimum sum of **7**.
 
 ---
@@ -39,6 +41,7 @@ That's a skill issue. The language isn't the bottleneck. The dev is.
 
 The idiomatic solution uses **Row-Major Dynamic Programming**.
 We iterate through the grid row by row, then column by column.
+
 $$
 D_{r,c} = A_{r,c} + \min(D_{r-1,c}, D_{r,c-1})
 $$
@@ -103,9 +106,11 @@ instruction. In a superscalar processor, this prevents the Reservation Stations 
 simultaneously.
 
 By rotating the execution domain to diagonals, we isolate the dependency to the *previous* iteration step.
+
 $$
 \forall \text{cell } i, j \in \text{Diagonal}_k: \text{Dependency}(i, j) \cap \text{Diagonal}_k = \emptyset
 $$
+
 This guarantees that the **Instruction Level Parallelism (ILP)** is limited only by the width of the SIMD registers (
 AVX2 YMM) and the throughput of the execution ports, rather than logical constraints.
 
