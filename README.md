@@ -1,9 +1,9 @@
-# High-Performance SIMD Solver: Minimum Path Sum
+# Path-Sum-Solver | High-Performance SIMD Optimization
 
-## 1. Problem Definition
+A high-performance system for computing minimum path sums on integer grids using hardware-accelerated wavefront propagation and AVX2 intrinsics.
 
-The objective is to minimize the path sum from the top-left to the bottom-right of an $m \times n$ grid filled with
-non-negative integers.
+## 🧩 The Challenge: Minimum Path Sum
+The system is designed to solve the classic optimization problem of finding the minimum path sum from the top-left ($A_{0,0}$) to the bottom-right ($A_{m,n}$) of a grid filled with non-negative integers.
 
 **Constraints:**
 
@@ -23,138 +23,9 @@ $$
 
 The optimal path is $1 \to 3 \to 1 \to 1 \to 1$, yielding a minimum sum of **7**.
 
----
 
-## 2. Motivation
-
-I did this to prove a point, and I made a damn good one.
-
-People act like C# is only for boring CRUD apps.
-
-That's a skill issue. The language isn't the bottleneck. The dev is.
-
----
-
-## 3. Algorithms
-
-### 3.1 Standard Approach (Reference)
-
-The idiomatic solution uses **Row-Major Dynamic Programming**.
-We iterate through the grid row by row, then column by column.
-
-$$
-D_{r,c} = A_{r,c} + \min(D_{r-1,c}, D_{r,c-1})
-$$
-
-* **Pros:** Simple to implement, cache-friendly for row access.
-* **Cons:** **Strict Serial Dependency**. We cannot compute cell $(r,c)$ until its immediate left neighbor $(r, c-1)$ is
-  finished. This creates a "Read-After-Write" (RAW) hazard that prevents vectorization within the row. The CPU forces a
-  pipeline stall, processing one cell at a time.
-
-### 3.2 Optimized Approach (Wavefront/Diagonal)
-
-To utilize SIMD (Single Instruction, Multiple Data), we reparameterize the iteration space from $(r, c)$ to
-diagonals $k = r + c$.
-
-* **The Shift:** We process the grid in "waves" moving from the top-left to bottom-right.
-* **Independence:** In diagonal $k$, every cell depends only on cells from diagonal $k-1$.
-* **Result:** All cells in the current diagonal are mutually independent. This allows us to compute an entire wavefront
-  in parallel using 256-bit wide vector registers.
-
----
-
-## 4. Applied C# / Low-Level Tricks
-
-- **Native AOT** - Compiles directly to machine code, eliminating JIT compiler overhead and the code warmup process.
-- **Core Isolation (Core Pinning)** - Assigns the process exclusively to Core #7 with Real-Time priority to minimize OS
-  jitter and context switching.
-- **AVX2 Intrinsics** - Processes 32 values (`short`) in a single clock cycle using 256-bit wide hardware registers.
-- **Branchless Logic** - Complete removal of `if` statements from the main loop (replaced by data padding), eliminating
-  *Branch Misprediction* penalties.
-- **Streamed Weights** - Weights are precomputed into a linear buffer, allowing for perfect *Hardware Prefetching* and
-  reducing ALU load.
-- **NativeMemory & Unsafe** - Bypasses the Garbage Collector and *Bounds Checking* for maximum RAM access speed using
-  raw pointers.
-- **Overshooting (Padding)** - Extends buffers to always process full 256-bit vectors, eliminating the need for complex
-  edge-handling code.
-- **Manual Loop Unrolling** - Processes two vector blocks per iteration to saturate the CPU execution pipeline (
-  *Instruction Level Parallelism*).
-- **SkipLocalsInit** - Prevents the runtime from zero-initializing stack memory upon every function entry, saving clock
-  cycles in high-frequency calls.
-- **Memory Alignment (64-byte)** - Uses `AlignedAlloc` to ensure data starts on cache-line boundaries, enabling the use
-  of `LoadAlignedVector256` for maximum throughput.
-- **Double Buffering** - Manages state by alternating between two memory buffers, ensuring the "new" diagonal is
-  calculated from the "old" one without race conditions.
-- **Vector Conversion (SIMD Promotion)** - Promotes 8-bit weights to 16-bit vectors on-the-fly, optimizing memory
-  bandwidth while preventing arithmetic overflow.
-- **Native Pointer Arithmetic** - Uses direct pointer offsets instead of array indexing to bypass all high-level runtime
-  abstractions and safety checks.
-- **Aggressive Optimization Hints** - Uses `AggressiveOptimization` and `AggressiveInlining` attributes to force the
-  compiler to apply the most radical optimization passes.
-- **ASLR Disabled** - Operates with predictable memory addresses to help the hardware prefetcher and branch target
-  buffer (BTB) optimize access patterns.
-
----
-
-## 5. Technical Deep Dive
-
-### 5.1 Data Dependency Analysis
-
-The fundamental bottleneck in the standard algorithm is the **Loop-Carried Dependency**.
-For $D_{r,c} = f(D_{r,c-1})$, the calculation of the current state requires the result of the immediately preceding
-instruction. In a superscalar processor, this prevents the Reservation Stations from dispatching multiple instructions
-simultaneously.
-
-By rotating the execution domain to diagonals, we isolate the dependency to the *previous* iteration step.
-
-$$
-\forall \text{cell } i, j \in \text{Diagonal}_k: \text{Dependency}(i, j) \cap \text{Diagonal}_k = \emptyset
-$$
-
-This guarantees that the **Instruction Level Parallelism (ILP)** is limited only by the width of the SIMD registers (
-AVX2 YMM) and the throughput of the execution ports, rather than logical constraints.
-
-### 5.2 Memory Hierarchy & Layout
-
-We map the 2D grid logic onto a **1D Double-Buffered Memory Arena**.
-Since the wavefront size grows and shrinks ($1 \to \min(m,n) \to 1$), we allocate two aligned buffers of
-size $N + \text{padding}$.
-
-* **Spatial Locality:** Access patterns are purely linear (streamed). This triggers the CPU's hardware prefetcher (L1
-  Stream Buffer) to aggressively pull data into the L1 cache before the instructions request it, minimizing Last-Level
-  Cache (LLC) misses.
-* **Alignment:** Buffers are allocated on 64-byte boundaries. This prevents "split loads" (where a single vector load
-  spans two cache lines), ensuring that `vmovaps` (aligned move) instructions execute with minimum latency.
-
-### 5.3 The SIMD Kernel Pipeline
-
-The inner loop utilizes a "Load-Compute-Store" pipeline optimized for the x86 execution ports. We process `short` (
-16-bit) integers, allowing 16 elements per 256-bit register.
-
-The kernel logic performs the following in a single cycle:
-
-1. **Dependency Load:** `vCenter` is loaded aligned. `vLeft` is loaded unaligned at `offset - 1`.
-2. **Comparison:** `vpminsw` performs 16 signed comparisons in parallel.
-3. **Accumulation:** `vpaddw` adds the weight vector.
-4. **Write Back:** The result is stored in the "Next" buffer.
-
-Crucially, we utilize **Sentinel Padding** (filling the buffer edges with $\infty$). This converts control-flow logic (
-checking boundaries) into data-flow logic (arithmetic comparison). Since $\min(x, \infty) = x$, the branch predictor is
-never invoked, eliminating pipeline flushes due to misprediction.
-
-### 5.4 Latency Hiding via Unrolling
-
-Even with SIMD, read-after-write latencies on registers can occur. To mitigate this, we manually unroll the loop by a
-factor of 2.
-We calculate two blocks (32 cells) per iteration:
-
-* Block A uses register set $YMM_{0-3}$
-* Block B uses register set $YMM_{4-7}$
-
-This allows the Out-of-Order (OoO) scheduler to execute instructions for Block B while Block A is waiting for memory
-loads, effectively maximizing the saturation of the arithmetic logic units (ALUs).
-
-## 6. Benchmark Results
+## 📺 Performance Benchmark
+*Comparison between a standard JIT-compiled DP approach and the optimized Native AOT SIMD kernel.*
 
 ```text
 ➜  src  make up
@@ -177,5 +48,66 @@ SIMD:        49.71 us
 
 >>> SIMD version is 31.06 x faster (96.00% reduction)
 ========================================================
-
 ```
+
+## 🏗️ Architecture & Context
+*High-level system design and execution model.*
+
+* **Objective:** Perform high-speed path sum computation on large-scale integer grids.
+* **Architecture Pattern:** Data-Oriented Design (DOD) utilizing **SIMD Wavefront Processing**.
+* **Data Flow:** Procedural Seed → Linearized Weight Stream → Double-Buffered AVX2 Kernel → Scalar Reduction.
+
+## ⚖️ Design Decisions & Trade-offs
+*Technical justifications for engineering choices.*
+
+* **Memory Management: Native Memory & Unsafe Pointers**
+    * **Context:** High-frequency memory access in the hot loop ($10^6$ iterations).
+    * **Decision:** Utilization of `NativeMemory` with `unsafe` pointer arithmetic.
+    * **Rationale:** Eliminated Garbage Collector (GC) pauses and Array Bounds Check (ABC) overhead to ensure deterministic latency.
+    * **Trade-off:** Sacrificed managed safety for raw access speed and explicit cache-line alignment.
+
+* **Execution Strategy: Diagonal Wavefront Iteration**
+    * **Context:** Standard Row-Major traversal has a strict serial dependency ($D_{r,c}$ depends on $D_{r,c-1}$).
+    * **Decision:** Transition to **Diagonal Wavefront Iteration**.
+    * **Rationale:** Diagonal iteration isolates dependencies to the previous wavefront, enabling parallel SIMD execution within the current diagonal.
+    * **Trade-off:** Sacrificed spatial locality of the source grid for Instruction-Level Parallelism (ILP), requiring an auxiliary pre-linearization step.
+
+* **Compilation Model: Native AOT**
+    * **Context:** Requirement for minimal cold-start performance jitter.
+    * **Decision:** Ahead-of-Time (AOT) compilation.
+    * **Rationale:** Produces a self-contained executable with aggressive optimization hints locked at compile time.
+    * **Trade-off:** Sacrificed binary portability for stable instruction emission and reduced startup time.
+
+## 🧠 Engineering Challenges
+*Analysis of non-trivial technical hurdles addressed.*
+
+* **Challenge: Control Flow Hazards**
+    * **Problem:** Conditional logic for grid boundaries causes CPU branch mispredictions, flushing the instruction pipeline.
+    * **Implementation:** **Branchless Sentinel Strategy**. Padded simulation buffers with `Infinity` values ($20000$) beyond valid grid boundaries. The kernel computes $\min(\text{Valid}, \infty)$ without branching.
+    * **Outcome:** Zero branch instructions in the inner loop; consistent throughput regardless of grid position.
+
+* **Challenge: Read-After-Write Latency**
+    * **Problem:** Dependency chains between vector instructions stall execution ports.
+    * **Implementation:** **Manual Loop Unrolling (2x)**. The kernel processes two independent 256-bit vectors (**32 cells**) per iteration using independent register sets.
+    * **Outcome:** Saturated CPU execution ports by allowing Out-of-Order (OoO) execution to hide memory load latency.
+
+## 🛠️ Tech Stack & Ecosystem
+* **Core:** C# (Unsafe Context, System.Runtime.Intrinsics)
+* **Infrastructure:** .NET Native AOT / Linux `taskset` (Core Isolation)
+* **Tooling:** AVX2 Intrinsics, `perf`, `make`
+
+## 🧪 Quality & Standards
+* **Testing Strategy:** Dual-Implementation Verification. The optimized SIMD kernel is strictly validated against a scalar Reference Implementation (Standard DP) using identical procedural seeds.
+* **Observability:** High-resolution hardware timestamping measuring microsecond-level execution time.
+* **Engineering Principles:** Zero-Allocation on Hot Paths, Cache-Line Alignment (64-byte), and Hardware Intrinsics over Compiler Auto-Vectorization.
+
+## 🙋‍♂️ Author
+
+**Kamil Fudala**
+
+- [GitHub](https://github.com/FreakyF)
+- [LinkedIn](https://www.linkedin.com/in/kamil-fudala/)
+
+## ⚖️ License
+
+This project is licensed under the [MIT License](LICENSE).
